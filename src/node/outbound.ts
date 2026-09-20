@@ -16,6 +16,8 @@
 
 import type { AssistantMessage, AssistantStreamRecord } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import fs from 'node:fs'
+import path from 'node:path'
 import {
   ITEM_TOOL_CALL_RESULT,
   ITEM_TOOL_CALL_START,
@@ -285,6 +287,9 @@ function deliverAssistantText(node: WechatBridgeNode, peer: string, sessionId: s
  */
 export function attachSessionOutbound(node: WechatBridgeNode): () => void {
   const digestState = new Map<string, DigestState>()
+  // per-session dedup for present→WeChat forwarding:
+  // absPath -> "size:mtimeMs" of the last copy actually enqueued.
+  const presentedSent = new Map<string, Map<string, string>>()
 
   const stopHeartbeat = (state: DigestState) => {
     if (state.heartbeat) {
@@ -392,6 +397,60 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       }
       // Groups stay quiet: no heartbeat spam in shared chats.
       if (!group) startHeartbeat(session, peer, state)
+      return
+    }
+
+    // present tool → WeChat: forward the files the agent declared as
+    // deliverables as native image/file messages. v0.2.0 only forwarded
+    // assistant text and logged this event without acting on it.
+    // Fires at tool-result time (files already validated to exist), i.e. a
+    // few seconds before the turn's final answer flushes. Dedup per session
+    // by path+size+mtime so re-presenting an unchanged file is a no-op.
+    // NOTE: 'deliverables/presented' (host present tool) is not a member of
+    // this host version's SessionEventType union — widen the comparison and
+    // read the payload defensively.
+    if ((event.type as string) === 'deliverables/presented') {
+      if (!group) {
+        const presented = event as { data?: { files?: ReadonlyArray<{ path?: string }> } }
+        const files = Array.isArray(presented.data?.files) ? presented.data.files : []
+        const cwd = session.header?.cwd
+        let sentMap = presentedSent.get(session.id)
+        if (!sentMap) {
+          sentMap = new Map()
+          presentedSent.set(session.id, sentMap)
+        }
+        const queued: string[] = []
+        for (const file of files.slice(0, 8)) {
+          const raw = typeof file?.path === 'string' ? file.path : ''
+          if (!raw) continue
+          let abs: string
+          try {
+            abs = path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(cwd ?? process.cwd(), raw)
+          } catch {
+            continue
+          }
+          let st: fs.Stats
+          try {
+            st = fs.statSync(abs)
+          } catch {
+            continue
+          }
+          if (!st.isFile()) continue
+          const key = `${st.size}:${st.mtimeMs}`
+          if (sentMap.get(abs) === key) continue // unchanged file already forwarded in this session
+          if (sentMap.size >= 256) sentMap.clear()
+          sentMap.set(abs, key)
+          const isImage = /\.(png|jpe?g|webp|gif|bmp)$/i.test(abs)
+          const kind = isImage && st.size <= 5 * 1024 * 1024 ? 'image' : 'file'
+          const base = path.basename(abs)
+          node.enqueueMedia(peer, kind, abs, base)
+          queued.push(base)
+        }
+        if (queued.length > 0) {
+          debugLogEvent({ event: 'presented-forwarded', session: session.id, files: queued })
+          node.enqueueText(peer, `📎 正在发送 ${queued.length} 个文件：${queued.join('、')}`, { kind: 'system' })
+        }
+      }
       return
     }
 
@@ -540,6 +599,7 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
     const state = digestState.get(sessionId)
     if (state) stopHeartbeat(state)
     digestState.delete(sessionId)
+    presentedSent.delete(sessionId)
   })
   return () => {
     unregisterCleanup()
