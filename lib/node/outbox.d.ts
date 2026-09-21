@@ -58,9 +58,14 @@ export interface OutboxEntry {
  * critical re-pushes. Outranks everything, and is EXEMPT from the per-peer
  * session-window send quota — the server's ~10-send window cap must never
  * starve the messages the user explicitly asked for.
+ *
+ * mediaAck (8): the post-media delivery confirmation ("图片已发送"). Lands
+ * right after its media (system, 10) but ahead of the still-queued turn-end
+ * digest lines (also system) so the ⏱/🧮 "task over" lines stay last.
  */
 export declare const OUTBOX_PRIORITY: {
     readonly must: 5;
+    readonly mediaAck: 8;
     readonly system: 10;
     readonly text: 20;
     readonly tool: 25;

@@ -64,8 +64,12 @@ export interface OutboxEntry {
  * critical re-pushes. Outranks everything, and is EXEMPT from the per-peer
  * session-window send quota — the server's ~10-send window cap must never
  * starve the messages the user explicitly asked for.
+ *
+ * mediaAck (8): the post-media delivery confirmation ("图片已发送"). Lands
+ * right after its media (system, 10) but ahead of the still-queued turn-end
+ * digest lines (also system) so the ⏱/🧮 "task over" lines stay last.
  */
-export const OUTBOX_PRIORITY = { must: 5, system: 10, text: 20, tool: 25, progress: 30 } as const
+export const OUTBOX_PRIORITY = { must: 5, mediaAck: 8, system: 10, text: 20, tool: 25, progress: 30 } as const
 
 /** Max attempts (1 send + this many retries) for transport-level failures. */
 export const OUTBOX_MAX_ATTEMPTS = 3

@@ -395,7 +395,11 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       if (!state.startedTurns.has(turn)) {
         state.startedTurns.add(turn)
         if (!group) {
-          node.enqueueText(peer, '⏳ 收到，开始处理…', { kind: 'system', resendOnRecovery: true })
+          // must: the receipt must never wait behind an in-flight media
+          // upload (the serial pump blocks on a media entry for the whole
+          // CDN upload — a 60s silent gap reads as a dead bot) and does
+          // not consume the peer's session-window quota.
+          node.enqueueText(peer, '⏳ 收到，开始处理…', { kind: 'system', priority: OUTBOX_PRIORITY.must, resendOnRecovery: true })
           sendTyping(peer, 1)
         }
       }
@@ -464,13 +468,16 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
           }
         }
         if (queued.length > 0) {
+          const bases = queued.map((q) => q.base)
+          debugLogEvent({ event: 'presented-forwarded', session: session.id, files: bases })
+          // Label FIRST: it shares the media's system priority class, and
+          // the stable sort keeps insertion order for equal createdAt —
+          // the label must lead its images, not trail them.
+          node.enqueueText(peer, `📎 正在发送 ${bases.length} 个文件：${bases.join('、')}`, { kind: 'system' })
           for (const q of queued) {
             sentMap.set(q.abs, q.key)
             node.enqueueMedia(peer, q.kind, q.abs, q.base)
           }
-          const bases = queued.map((q) => q.base)
-          debugLogEvent({ event: 'presented-forwarded', session: session.id, files: bases })
-          node.enqueueText(peer, `📎 正在发送 ${bases.length} 个文件：${bases.join('、')}`, { kind: 'system' })
         }
         turnState.count += queued.length
       }

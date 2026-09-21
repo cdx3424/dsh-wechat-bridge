@@ -570,7 +570,12 @@ export class WechatBridgeNode {
       // and doubles as the client-side refresh trigger.
       if (result.ok) {
         const label = entry.kind === 'image' ? '📷 图片已发送' : entry.kind === 'video' ? '📹 视频已发送' : '📎 文件已发送'
-        this.enqueueText(entry.to ?? '', `${label}：${entry.media.fileName}（未显示请发任意消息）`, { kind: 'system' })
+        this.enqueueText(entry.to ?? '', `${label}：${entry.media.fileName}（未显示请发任意消息）`, {
+          kind: 'system',
+          // mediaAck: right after its media, ahead of the still-queued
+          // turn-end digest lines (both are system priority).
+          priority: OUTBOX_PRIORITY.mediaAck,
+        })
       }
       return result
     }
@@ -717,7 +722,13 @@ export class WechatBridgeNode {
   enqueueMedia(peerId: string, kind: 'file' | 'image' | 'video', filePath: string, fileName: string, fallbackText?: string): void {
     this.outbox.enqueue({
       kind,
-      priority: OUTBOX_PRIORITY.text,
+      // system (not text): the artifact must land BEFORE the turn-end
+      // digest lines (⏱ 用时 / 🧮 上下文, also system). FIFO within the
+      // class by enqueue time puts media — enqueued mid-turn at present —
+      // ahead of the digest enqueued at turn end, so the "task over"
+      // lines stay last (observed complaint 2026-09-21: the digest
+      // printed before the image had even finished uploading).
+      priority: OUTBOX_PRIORITY.system,
       to: peerId,
       media: { filePath, fileName },
       text: fallbackText,
