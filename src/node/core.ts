@@ -535,30 +535,42 @@ export class WechatBridgeNode {
     }
     if (entry.kind === 'file' || entry.kind === 'image' || entry.kind === 'video') {
       if (entry.media === undefined) return { ok: false, errmsg: 'missing media' }
+      let result: SendResult
       if (entry.kind === 'image') {
-        return this.ctx.wechat.sendImage({ toUserId: target, filePath: entry.media.filePath, contextToken, runId })
+        result = await this.ctx.wechat.sendImage({ toUserId: target, filePath: entry.media.filePath, contextToken, runId })
+      } else if (entry.kind === 'video') {
+        result = await this.ctx.wechat.sendVideo({ toUserId: target, filePath: entry.media.filePath, contextToken, runId })
+      } else {
+        result = await this.ctx.wechat.sendFile({
+          toUserId: target,
+          filePath: entry.media.filePath,
+          fileName: entry.media.fileName,
+          contextToken,
+          runId,
+        })
       }
-      if (entry.kind === 'video') {
-        return this.ctx.wechat.sendVideo({ toUserId: target, filePath: entry.media.filePath, contextToken, runId })
-      }
-      const result = await this.ctx.wechat.sendFile({
-        toUserId: target,
-        filePath: entry.media.filePath,
-        fileName: entry.media.fileName,
-        contextToken,
-        runId,
-      })
       // Graceful degradation: when the file channel fails outright, deliver the
       // full answer as chunked text instead of losing it behind a dead digest.
       // Fallback fires AT MOST ONCE per entry — after it, the file entry
       // settles (see outbox handleResult) instead of duplicating the text on
       // every transport retry.
-      if (!result.ok && entry.text && !entry.fallbackFired) {
+      if (!result.ok && entry.kind === 'file' && entry.text && !entry.fallbackFired) {
         entry.fallbackFired = true
         const chunks = splitForWechat(entry.text, this.resolved.maxMessageChars)
         for (const [index, chunk] of chunks.entries()) {
           this.enqueueText(entry.to ?? '', index === 0 ? chunk : chunk, { kind: 'text' })
         }
+      }
+      // Delivery confirmation: the WeChat client sometimes renders a
+      // bot-sent media item only after the conversation is refreshed
+      // (observed 2026-09-21: the image was server-acked seconds before the
+      // user's next inbound and appeared only after it — the turn was
+      // already over, so the user assumed the file was lost). The
+      // confirmation travels the normal text path (delivered immediately)
+      // and doubles as the client-side refresh trigger.
+      if (result.ok) {
+        const label = entry.kind === 'image' ? '📷 图片已发送' : entry.kind === 'video' ? '📹 视频已发送' : '📎 文件已发送'
+        this.enqueueText(entry.to ?? '', `${label}：${entry.media.fileName}（未显示请发任意消息）`, { kind: 'system' })
       }
       return result
     }
