@@ -290,6 +290,9 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
   // per-session dedup for present→WeChat forwarding:
   // absPath -> "size:mtimeMs" of the last copy actually enqueued.
   const presentedSent = new Map<string, Map<string, string>>()
+  // per-turn media-forward cap state (looping-agent guard):
+  // sessionId -> { media forwarded this turn, warned already? }
+  const presentedTurn = new Map<string, { count: number; warned: boolean }>()
 
   const stopHeartbeat = (state: DigestState) => {
     if (state.heartbeat) {
@@ -388,6 +391,7 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       state.cardedCalls.clear()
       state.turnStartedAt = Date.now()
       state.lastAssistantText = null
+      presentedTurn.delete(session.id) // reset the per-turn media cap
       if (!state.startedTurns.has(turn)) {
         state.startedTurns.add(turn)
         if (!group) {
@@ -419,7 +423,7 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
           sentMap = new Map()
           presentedSent.set(session.id, sentMap)
         }
-        const queued: string[] = []
+        const queued: { abs: string; key: string; kind: 'image' | 'file'; base: string }[] = []
         for (const file of files.slice(0, 8)) {
           const raw = typeof file?.path === 'string' ? file.path : ''
           if (!raw) continue
@@ -439,17 +443,36 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
           const key = `${st.size}:${st.mtimeMs}`
           if (sentMap.get(abs) === key) continue // unchanged file already forwarded in this session
           if (sentMap.size >= 256) sentMap.clear()
-          sentMap.set(abs, key)
           const isImage = /\.(png|jpe?g|webp|gif|bmp)$/i.test(abs)
           const kind = isImage && st.size <= 5 * 1024 * 1024 ? 'image' : 'file'
-          const base = path.basename(abs)
-          node.enqueueMedia(peer, kind, abs, base)
-          queued.push(base)
+          queued.push({ abs, key, kind, base: path.basename(abs) })
+        }
+        // Per-turn cap: a looping agent (observed 2026-09-21: one turn
+        // presented 25 screenshots in a row) would flood the peer with
+        // media — cap auto-forwarding at 8 files per turn, warn once.
+        let turnState = presentedTurn.get(session.id)
+        if (!turnState) {
+          turnState = { count: 0, warned: false }
+          presentedTurn.set(session.id, turnState)
+        }
+        const TURN_MEDIA_CAP = 8
+        if (turnState.count + queued.length > TURN_MEDIA_CAP) {
+          queued.length = Math.max(0, TURN_MEDIA_CAP - turnState.count)
+          if (!turnState.warned) {
+            turnState.warned = true
+            node.enqueueText(peer, `⚠️ 本轮自动转发已达上限（${TURN_MEDIA_CAP} 个文件），其余未发送——agent 可能在循环调用工具`, { kind: 'system' })
+          }
         }
         if (queued.length > 0) {
-          debugLogEvent({ event: 'presented-forwarded', session: session.id, files: queued })
-          node.enqueueText(peer, `📎 正在发送 ${queued.length} 个文件：${queued.join('、')}`, { kind: 'system' })
+          for (const q of queued) {
+            sentMap.set(q.abs, q.key)
+            node.enqueueMedia(peer, q.kind, q.abs, q.base)
+          }
+          const bases = queued.map((q) => q.base)
+          debugLogEvent({ event: 'presented-forwarded', session: session.id, files: bases })
+          node.enqueueText(peer, `📎 正在发送 ${bases.length} 个文件：${bases.join('、')}`, { kind: 'system' })
         }
+        turnState.count += queued.length
       }
       return
     }
@@ -600,6 +623,7 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
     if (state) stopHeartbeat(state)
     digestState.delete(sessionId)
     presentedSent.delete(sessionId)
+    presentedTurn.delete(sessionId)
   })
   return () => {
     unregisterCleanup()
